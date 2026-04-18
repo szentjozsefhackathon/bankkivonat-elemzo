@@ -1,0 +1,1 @@
+# bankkivonat-elemzo
