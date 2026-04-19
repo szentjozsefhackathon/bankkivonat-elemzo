@@ -1,5 +1,5 @@
 # bankkivonat-elemzo
-A project-en belül két funkciót valósítottunk meg.
+A project-en belül két funkciót valósítottunk meg. Az azutomatizalt letöltő modul elkészült, de nem publikáltuk, mert jogi kérdéseket vetett fel a felhasználása. 
 ## Automatizált banki letöltő modul
 Az automatizált letőltő specifikus a CIB Businessonline web applikációhoz.
 A letőltő program python programozási nyelven lett megvalósítva.
