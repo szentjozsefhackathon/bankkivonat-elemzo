@@ -1,15 +1,15 @@
 import xml.etree.ElementTree as ET
 import pandas as pd
-import argparse, os, ast
+import argparse, os, ast, time
 from datetime import datetime
 from openpyxl.styles import Font, Alignment, PatternFill
 from itertools import combinations
+from rich.progress import track
 
 # TRANSFORMERS IMPORTS
 from transformers import pipeline
 from transformers import logging as transformers_logging
 from transformers.utils import logging
-
 
 def get_name_entities(text):
     entities = []
@@ -36,7 +36,6 @@ def get_name_entities(text):
                 'start': start,
                 'end': end
             })
-
 
     if current_ent:
         entities.append(current_ent)
@@ -79,12 +78,39 @@ def ujfFeldolgozó(file_path):
 
 def megjegyzesKeszito(tomb):
     results = []
-    
     for i in tomb:
         if i["type"] == "PER":
             results.append(i["word"])
-
     return ", ".join(results)
+
+def get_balance(root, ns):
+    opening = 0.0
+    closing = 0.0
+    for bal in root.findall('.//ns:Stmt/ns:Bal', ns):
+        tp_node = bal.find('.//ns:CdOrPrtry/ns:Cd', ns)
+        amt = float(bal.find('ns:Amt', ns).text)
+        if tp_node is not None:
+            if tp_node.text == 'OPBD': # Nyitó könyvelt 
+                opening = amt
+            elif tp_node.text == 'CLBD': # Záró könyvelt 
+                closing = amt
+    return opening, closing
+
+def add_new_line(srsz="", date="", biz="", kod="", jogc="", jovir="", ter="", egyenleg="", partner="", kozlemeny="", megj="", ev=""):
+    return {
+                "Sorszám": srsz,
+                "Dátum": date,
+                "Bizonylat": biz,
+                "Kód": kod,
+                "Jogcím": jogc,
+                "Jóváírás": jovir,
+                "Terhelés": ter,
+                "Egyenleg": egyenleg,
+                "Partner neve": partner,
+                "Közlemény": kozlemeny,
+                "Megjegyzés": megj,
+                "Egyházadó év": ev
+            }
 
 def convert_camt053_to_xlsx(xml_file, output_file, printable, folder_path):
     # XML beolvasása
@@ -92,43 +118,21 @@ def convert_camt053_to_xlsx(xml_file, output_file, printable, folder_path):
     root = tree.getroot()
     ns = {'ns': 'urn:iso:std:iso:20022:tech:xsd:camt.053.001.02'}
     
-    # 1. Bizonylatszám/Kivonat szám kinyerése a fejlécből (LglSeqNb (XML tag))
+    # Bizonylatszám/Kivonat szám kinyerése a fejlécből (LglSeqNb (XML tag))
     lgl_seq_node = root.find('.//ns:Stmt/ns:LglSeqNb', ns)
     bizonylat_sorszam = lgl_seq_node.text if lgl_seq_node is not None else ""
     
     # 1. Nyitó és Záró egyenlegek kinyerése a fileból
-    opening_balance = 0.0
-    closing_balance = 0.0
-    for bal in root.findall('.//ns:Stmt/ns:Bal', ns):
-        tp_node = bal.find('.//ns:CdOrPrtry/ns:Cd', ns)
-        amt = float(bal.find('ns:Amt', ns).text)
-        if tp_node is not None:
-            if tp_node.text == 'OPBD': # Nyitó könyvelt 
-                opening_balance = amt
-            elif tp_node.text == 'CLBD': # Záró könyvelt 
-                closing_balance = amt
-    
-    transactions = []
+    opening_balance, closing_balance = get_balance(root, ns)
     current_running_balance = opening_balance
+    transactions = []
     sorsz = 1
 
-    transactions.append({
-                "Sorszám": "",
-                "Dátum": "",
-                "Bizonylat": "",
-                "Kód": "",
-                "Jogcím": "",
-                "Jóváírás": "",
-                "Terhelés": "",
-                "Egyenleg": opening_balance,
-                "Partner neve": "",
-                "Közlemény": "",
-                "Megjegyzés": "Nyitó Egyenleg",
-                "Egyházadó év": ""
-            })
+    # Nyitó Egyenleg Táblázathoz Adása
+    transactions.append(add_new_line(egyenleg=opening_balance, megj="Nyitó Egyenleg"))
 
-    # 2. File bejárása Entry-nként
-    for ntry in root.findall('.//ns:Stmt/ns:Ntry', ns):
+    # File bejárása Entry-nként
+    for ntry in track(root.findall('.//ns:Stmt/ns:Ntry', ns), description="Feldolgozás..."):
         amt_node = ntry.find('ns:Amt', ns)
         amount = float(amt_node.text) if amt_node is not None else 0.0
         indicator = ntry.find('ns:CdtDbtInd', ns).text if ntry.find('ns:CdtDbtInd', ns) is not None else ""
@@ -160,8 +164,7 @@ def convert_camt053_to_xlsx(xml_file, output_file, printable, folder_path):
             rmt_node = tx_details.find('.//ns:RmtInf/ns:Ustrd', ns)
             remittance_info = rmt_node.text if rmt_node is not None else ""
 
-
-        # --- 3. KÓD (jogcimkod) ---
+        # Jogcímkód meghatározása
         kod = ""
         jogcim = ""
         megjegyzes = ""
@@ -171,20 +174,8 @@ def convert_camt053_to_xlsx(xml_file, output_file, printable, folder_path):
         add_low = add_info.lower()
 
         if "output" in rem_low:
-            transactions.append({
-                "Sorszám": sorsz,
-                "Dátum": bookg_dt,
-                "Bizonylat": bizonylat_sorszam,
-                "Kód": kod,
-                "Jogcím": jogcim,
-                "Jóváírás": credit_amount,
-                "Terhelés": debit_amount,
-                "Egyenleg": current_running_balance,
-                "Partner neve": partner_name,
-                "Közlemény": remittance_info,
-                "Megjegyzés": "",
-                "Egyházadó év": evszam
-            })
+            transactions.append(add_new_line(sorsz, bookg_dt, bizonylat_sorszam, kod, jogcim, credit_amount, debit_amount, 
+                                             current_running_balance, partner_name, remittance_info, "", evszam))
             sorsz += 1
 
             file_lista = os.listdir(folder_path)
@@ -193,46 +184,18 @@ def convert_camt053_to_xlsx(xml_file, output_file, printable, folder_path):
                     uj_adat = ujfFeldolgozó(f"{folder_path}/{i}")
                     if int(uj_adat[1]) >= int(credit_amount):
                         szamok = [x[1] for x in uj_adat[-1]]
-
                         for szam in range(0, len(szamok)+1):
                             eredmeny = osszeg_kereso(credit_amount, szam, szamok)
                             if eredmeny != None:
                                 break
-                            else:
-                                continue
 
                         for bejegyzes in uj_adat[-1]:
                             if bejegyzes[-1] in eredmeny:
-                                transactions.append({
-                                    "Sorszám": "",
-                                    "Dátum": bookg_dt,
-                                    "Bizonylat": bizonylat_sorszam,
-                                    "Kód": kod,
-                                    "Jogcím": jogcim,
-                                    "Jóváírás": bejegyzes[1],
-                                    "Terhelés": "",
-                                    "Egyenleg": "",
-                                    "Partner neve": "",
-                                    "Közlemény": remittance_info,
-                                    "Megjegyzés": "",
-                                    "Egyházadó év": evszam
-                                })
+                                transactions.append(add_new_line(date=bookg_dt, biz=bizonylat_sorszam, kod=kod, jogc=jogcim, jovir=bejegyzes[1], kozlemeny=remittance_info, ev=evszam))
                     else:
                         for bejegyzes in uj_adat[-1]:
-                            transactions.append({
-                                "Sorszám": "",
-                                "Dátum": bookg_dt,
-                                "Bizonylat": bizonylat_sorszam,
-                                "Kód": kod,
-                                "Jogcím": jogcim,
-                                "Jóváírás": bejegyzes[1],
-                                "Terhelés": "",
-                                "Egyenleg": current_running_balance,
-                                "Partner neve": partner_name,
-                                "Közlemény": remittance_info,
-                                "Megjegyzés": "",
-                                "Egyházadó év": evszam
-                            })
+                            transactions.append(add_new_line(date=bookg_dt, biz=bizonylat_sorszam, kod=kod, jogc=jogcim, jovir=bejegyzes[1], 
+                                                             egyenleg=current_running_balance, partner=partner_name, kozlemeny=remittance_info, ev=evszam))
     
         else:
             # 112: OTP Mobil / Persely
@@ -300,37 +263,11 @@ def convert_camt053_to_xlsx(xml_file, output_file, printable, folder_path):
             elif "átfutó" in rem_low or "átfutó" in add_low:
                 kod = 411
 
-            transactions.append({
-                "Sorszám": sorsz,
-                "Dátum": bookg_dt,
-                "Bizonylat": bizonylat_sorszam,
-                "Kód": kod,
-                "Jogcím": jogcim,
-                "Jóváírás": credit_amount,
-                "Terhelés": debit_amount,
-                "Egyenleg": current_running_balance,
-                "Partner neve": partner_name,
-                "Közlemény": remittance_info,
-                "Megjegyzés": megjegyzes,
-                "Egyházadó év": evszam
-            })
+            transactions.append(add_new_line(sorsz, bookg_dt, bizonylat_sorszam, kod, jogcim, credit_amount, debit_amount, 
+                                             current_running_balance, partner_name, remittance_info, megjegyzes, evszam))
             sorsz += 1
 
-
-    transactions.append({
-                "Sorszám": "",
-                "Dátum": "",
-                "Bizonylat": "",
-                "Kód": "",
-                "Jogcím": "",
-                "Jóváírás": "",
-                "Terhelés": "",
-                "Egyenleg": closing_balance,
-                "Partner neve": "",
-                "Közlemény": "",
-                "Megjegyzés": "Záró Egyenleg",
-                "Egyházadó év": ""
-            })
+    transactions.append(add_new_line(egyenleg=closing_balance, megj="Záró Egyenleg"))
 
     # DataFrame összeállítása
     df = pd.DataFrame(transactions)
@@ -384,9 +321,9 @@ def convert_camt053_to_xlsx(xml_file, output_file, printable, folder_path):
                             max_length = curr_len
                 except:
                     pass
-            
             adjusted_width = max(max_length + 2, 10)
             worksheet.column_dimensions[column_letter].width = adjusted_width
+        
         worksheet.column_dimensions["D"].width = 5
 
         center_alignment_vertical = Alignment(vertical='center')
@@ -429,7 +366,7 @@ def convert_camt053_to_xlsx(xml_file, output_file, printable, folder_path):
             worksheet.cell(row=2, column=c).fill = zold_kitoltes
             worksheet.cell(row=max_r, column=c).fill = zold_kitoltes
 
-    print(f"Fájl mentve {output_file} ({"Nyomtatható" if printable == 1 else "Default"})")
+    print(f"Fájl mentve ({"Nyomtatható" if printable == 1 else "Default"}): {output_file} ")
 
 if __name__ == "__main__":
     # Parancssori argumentumok létrehozása, kezelése
@@ -439,12 +376,14 @@ if __name__ == "__main__":
     parser.add_argument("-m", "--mappa", type=str, help="Az UJF filokat tartalmazó mappa relatív útvonala.", default="./ujf")
     parser.add_argument("-c", "--cfile", type=str, help="A célfile elérési útvonala.", default="bankszamlakivonat.xlsx")
     args = parser.parse_args()
-
+    
+    print("Betöltés...")
+    global ner_pipeline
     transformers_logging.set_verbosity_error()
     logging.disable_progress_bar()
-
-    global ner_pipeline
     ner_pipeline = pipeline("ner", model="NYTK/named-entity-recognition-nerkor-hubert-hungarian")
+    time.sleep(2)
+    
 
     if args.file:
         convert_camt053_to_xlsx(f'{args.file}', output_file=args.cfile, printable=args.nyomtat, folder_path=args.mappa)
